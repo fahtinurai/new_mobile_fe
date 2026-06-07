@@ -981,6 +981,15 @@ class _AnalyticsReportPageState extends State<AnalyticsReportPage> {
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(
+            Icons.arrow_back,
+            color: Colors.white,
+          ),
+          onPressed: () {
+            Navigator.pop(context);
+          },
+        ),
         title: const Text(
           "UNIT TRACKING",
           style: TextStyle(
