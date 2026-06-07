@@ -40,8 +40,25 @@ class TechnicianDamageReportService {
     }
   }
 
+  static Map<String, dynamic> _successFallback({
+    String message = "Request berhasil",
+    dynamic data,
+    String? rawBody,
+  }) {
+    return {
+      "success": true,
+      "message": message,
+      "data": data,
+      if (rawBody != null) "raw_body": rawBody,
+    };
+  }
+
   static List<dynamic> _parseList(String body) {
     final decoded = _safeJsonDecode(body);
+
+    if (decoded == null) {
+      return [];
+    }
 
     if (decoded is List) {
       return decoded;
@@ -85,21 +102,42 @@ class TechnicianDamageReportService {
       if (data is List) {
         return data;
       }
+
+      if (data is Map) {
+        final nestedData = data["data"];
+
+        if (nestedData is List) {
+          return nestedData;
+        }
+      }
     }
 
     return [];
   }
 
-  static Map<String, dynamic>? _parseMap(String body) {
+  static Map<String, dynamic> _parseMap(
+    String body, {
+    String fallbackMessage = "Request berhasil",
+  }) {
     final decoded = _safeJsonDecode(body);
 
+    if (decoded == null) {
+      return _successFallback(
+        message: fallbackMessage,
+        data: null,
+        rawBody: body.trim().isNotEmpty ? body : null,
+      );
+    }
+
     if (decoded is Map<String, dynamic>) {
-      if (decoded["data"] is Map<String, dynamic>) {
-        return decoded["data"] as Map<String, dynamic>;
+      final data = decoded["data"];
+
+      if (data is Map<String, dynamic>) {
+        return data;
       }
 
-      if (decoded["data"] is Map) {
-        return Map<String, dynamic>.from(decoded["data"] as Map);
+      if (data is Map) {
+        return Map<String, dynamic>.from(data);
       }
 
       return decoded;
@@ -109,7 +147,10 @@ class TechnicianDamageReportService {
       return Map<String, dynamic>.from(decoded);
     }
 
-    return null;
+    return _successFallback(
+      message: fallbackMessage,
+      data: decoded,
+    );
   }
 
   static String _errorMessage(http.Response response, String fallback) {
@@ -221,7 +262,10 @@ class TechnicianDamageReportService {
     debugPrint("TECHNICIAN SERVICE JOB DETAIL BODY: ${response.body}");
 
     if (response.statusCode == 200) {
-      return _parseMap(response.body);
+      return _parseMap(
+        response.body,
+        fallbackMessage: "Detail service job berhasil diambil",
+      );
     }
 
     throw Exception(
@@ -267,7 +311,10 @@ class TechnicianDamageReportService {
     debugPrint("START SERVICE JOB BODY: ${response.body}");
 
     if (_isSuccess(response.statusCode)) {
-      return _parseMap(response.body);
+      return _parseMap(
+        response.body,
+        fallbackMessage: "Service job berhasil dimulai",
+      );
     }
 
     throw Exception(
@@ -328,7 +375,10 @@ class TechnicianDamageReportService {
     debugPrint("COMPLETE SERVICE JOB BODY: ${response.body}");
 
     if (_isSuccess(response.statusCode)) {
-      return _parseMap(response.body);
+      return _parseMap(
+        response.body,
+        fallbackMessage: "Service job berhasil diselesaikan",
+      );
     }
 
     throw Exception(

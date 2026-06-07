@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:djatimobile_project/core/services/auth_service.dart';
+import 'package:djatimobile_project/core/services/technician_part_usage_service.dart';
 
 class MechanicTasksFlow extends StatelessWidget {
   const MechanicTasksFlow({super.key});
@@ -37,7 +39,105 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
     _loadTasks();
   }
 
+  dynamic _safeJsonDecode(String body) {
+    if (body.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      return jsonDecode(body);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<dynamic> _parseJobList(String body) {
+    final decoded = _safeJsonDecode(body);
+
+    if (decoded is List) {
+      return decoded;
+    }
+
+    if (decoded is Map<String, dynamic>) {
+      final data = decoded["data"];
+
+      if (data is List) {
+        return data;
+      }
+
+      if (data is Map<String, dynamic>) {
+        final nestedData = data["data"];
+
+        if (nestedData is List) {
+          return nestedData;
+        }
+      }
+
+      final jobs = decoded["jobs"];
+      if (jobs is List) {
+        return jobs;
+      }
+
+      final serviceJobs = decoded["service_jobs"];
+      if (serviceJobs is List) {
+        return serviceJobs;
+      }
+
+      final bookings = decoded["bookings"];
+      if (bookings is List) {
+        return bookings;
+      }
+    }
+
+    if (decoded is Map) {
+      final mapped = Map<String, dynamic>.from(decoded);
+      final data = mapped["data"];
+
+      if (data is List) {
+        return data;
+      }
+
+      if (data is Map) {
+        final nestedData = data["data"];
+
+        if (nestedData is List) {
+          return nestedData;
+        }
+      }
+    }
+
+    return [];
+  }
+
+  String _errorFromResponse(http.Response response, String fallback) {
+    final decoded = _safeJsonDecode(response.body);
+
+    if (decoded is Map<String, dynamic>) {
+      final message = decoded["message"]?.toString();
+
+      if (message != null && message.isNotEmpty) {
+        return message;
+      }
+
+      final errors = decoded["errors"];
+
+      if (errors is Map && errors.isNotEmpty) {
+        final firstValue = errors.values.first;
+
+        if (firstValue is List && firstValue.isNotEmpty) {
+          return firstValue.first.toString();
+        }
+
+        return firstValue.toString();
+      }
+    }
+
+    return "$fallback. Status: ${response.statusCode}";
+  }
+
   Future<void> _loadTasks() async {
+    if (!mounted) return;
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -62,15 +162,7 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
       debugPrint("MECHANIC JOB BODY: ${response.body}");
 
       if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
-
-        List<dynamic> jobs = [];
-
-        if (decoded is List) {
-          jobs = decoded;
-        } else if (decoded is Map<String, dynamic> && decoded["data"] is List) {
-          jobs = decoded["data"];
-        }
+        final jobs = _parseJobList(response.body);
 
         if (!mounted) return;
 
@@ -79,13 +171,18 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
           _isLoading = false;
         });
       } else {
-        throw Exception("Gagal mengambil job teknisi: ${response.body}");
+        throw Exception(
+          _errorFromResponse(
+            response,
+            "Gagal mengambil job teknisi",
+          ),
+        );
       }
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
-        _errorMessage = e.toString();
+        _errorMessage = e.toString().replaceFirst("Exception: ", "");
         _isLoading = false;
       });
     }
@@ -203,6 +300,7 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
   String _getStatusLabel(String status) {
     switch (status.toLowerCase()) {
       case "approved":
+      case "scheduled":
         return "Ready to Start";
 
       case "rescheduled":
@@ -226,6 +324,7 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
   Color _getStatusColor(String status) {
     switch (status.toLowerCase()) {
       case "approved":
+      case "scheduled":
         return Colors.lightBlueAccent;
 
       case "rescheduled":
@@ -333,6 +432,11 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
       );
     }
 
+    final mappedJobs = _jobs
+        .map((item) => _asMap(item))
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
     return RefreshIndicator(
       onRefresh: _loadTasks,
       color: const Color(0xFFF9A825),
@@ -357,10 +461,7 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
             ),
           ),
           const SizedBox(height: 16),
-
-          ..._jobs.map<Widget>((item) {
-            final job = Map<String, dynamic>.from(item as Map);
-
+          ...mappedJobs.map<Widget>((job) {
             final bookingId = job["id"]?.toString() ?? "-";
             final reportId = job["damage_report_id"]?.toString() ??
                 _getDamageReport(job)?["id"]?.toString() ??
@@ -387,13 +488,13 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                   side: BorderSide(
-                    color: statusColor.withOpacity(0.35),
+                    color: statusColor.withValues(alpha: 0.35),
                   ),
                 ),
                 child: ListTile(
                   contentPadding: const EdgeInsets.all(16),
                   onTap: () async {
-                    await Navigator.push(
+                    final result = await Navigator.push<bool>(
                       context,
                       MaterialPageRoute(
                         builder: (context) => TaskDetailsPage(
@@ -402,7 +503,11 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
                       ),
                     );
 
-                    _loadTasks();
+                    if (!mounted) return;
+
+                    if (result == true) {
+                      await _loadTasks();
+                    }
                   },
                   title: Text(
                     unit,
@@ -466,10 +571,10 @@ class _MechanicTasksPageState extends State<MechanicTasksPage> {
                             vertical: 5,
                           ),
                           decoration: BoxDecoration(
-                            color: statusColor.withOpacity(0.12),
+                            color: statusColor.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(
-                              color: statusColor.withOpacity(0.25),
+                              color: statusColor.withValues(alpha: 0.25),
                             ),
                           ),
                           child: Text(
@@ -577,6 +682,17 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
     return _asMap(report?["driver"]);
   }
 
+  int? _getDamageReportId() {
+    final report = _getDamageReport();
+
+    final rawId =
+        job["damage_report_id"] ??
+        job["damageReportId"] ??
+        report?["id"];
+
+    return int.tryParse(rawId?.toString() ?? "");
+  }
+
   String _getUnitName() {
     final vehicle = _getVehicle();
 
@@ -613,6 +729,107 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
     return report?["description"]?.toString() ??
         job["description"]?.toString() ??
         "-";
+  }
+
+  String? _normalizeDamageImageUrl(dynamic value) {
+    final raw = value?.toString().trim();
+
+    if (raw == null || raw.isEmpty || raw == "null") {
+      return null;
+    }
+
+    if (raw.startsWith("http://") || raw.startsWith("https://")) {
+      return raw;
+    }
+
+    var path = raw.replaceAll("\\", "/");
+
+    if (path.startsWith("/storage/")) {
+      return "http://10.0.2.2:8000$path";
+    }
+
+    if (path.startsWith("storage/")) {
+      return "http://10.0.2.2:8000/$path";
+    }
+
+    if (path.startsWith("public/")) {
+      path = path.replaceFirst("public/", "");
+    }
+
+    if (path.startsWith("/")) {
+      path = path.substring(1);
+    }
+
+    return "http://10.0.2.2:8000/storage/$path";
+  }
+
+  String? _getDamageImageUrl() {
+    final report = _getDamageReport();
+
+    final rawImage = report?["image_url"] ??
+        report?["photo_url"] ??
+        report?["damage_image_url"] ??
+        report?["image"] ??
+        report?["image_path"] ??
+        report?["photo"] ??
+        report?["damage_photo"] ??
+        report?["picture"] ??
+        report?["file_path"] ??
+        job["image_url"] ??
+        job["photo_url"] ??
+        job["damage_image_url"] ??
+        job["image"] ??
+        job["image_path"] ??
+        job["photo"] ??
+        job["damage_photo"] ??
+        job["picture"] ??
+        job["file_path"];
+
+    return _normalizeDamageImageUrl(rawImage);
+  }
+
+  void _openDamageImagePreview(String imageUrl) {
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.black,
+          insetPadding: const EdgeInsets.all(12),
+          child: Stack(
+            children: [
+              InteractiveViewer(
+                child: Center(
+                  child: Image.network(
+                    imageUrl,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) {
+                      return const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          "Gambar tidak dapat dimuat.",
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(
+                    Icons.close,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   String _getDriverName() {
@@ -655,6 +872,7 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
 
     switch (status.toLowerCase()) {
       case "approved":
+      case "scheduled":
         return "Ready to Start";
 
       case "rescheduled":
@@ -701,7 +919,9 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
   bool _canStart() {
     final status = job["status"]?.toString().toLowerCase() ?? "";
 
-    return status == "approved" || status == "rescheduled";
+    return status == "approved" ||
+        status == "scheduled" ||
+        status == "rescheduled";
   }
 
   bool _canComplete() {
@@ -714,8 +934,21 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
     final status = job["status"]?.toString().toLowerCase() ?? "";
 
     return status == "completed" ||
+        status == "finished" ||
+        status == "selesai" ||
         status == "canceled" ||
-        status == "cancelled";
+        status == "cancelled" ||
+        status == "dibatalkan";
+  }
+
+  bool _canRequestSparepart() {
+    final damageReportId = _getDamageReportId();
+    final status = job["status"]?.toString().toLowerCase() ?? "";
+
+    // Sparepart hanya boleh diminta setelah teknisi benar-benar mulai job.
+    return status == "in_progress" &&
+        damageReportId != null &&
+        damageReportId > 0;
   }
 
   String _getActionText() {
@@ -740,6 +973,8 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
     }
 
     if (!_canStart() && !_canComplete()) {
+      if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text("Status job belum bisa diproses."),
@@ -749,18 +984,59 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
       return;
     }
 
-    await Navigator.push(
+    final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (context) => TaskUpdatePage(
           job: job,
-          action: _canStart() ? TechnicianJobAction.start : TechnicianJobAction.complete,
+          action: _canStart()
+              ? TechnicianJobAction.start
+              : TechnicianJobAction.complete,
         ),
       ),
     );
 
-    if (mounted) {
-      Navigator.pop(context);
+    if (!mounted) return;
+
+    if (result == true) {
+      Navigator.pop(context, true);
+    }
+  }
+
+  Future<void> _openPartRequestModal() async {
+    final damageReportId = _getDamageReportId();
+
+    if (damageReportId == null || damageReportId <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Damage report ID tidak valid."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final result = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return RequestPartUsageModal(
+          damageReportId: damageReportId,
+          unitName: _getUnitName(),
+        );
+      },
+    );
+
+    if (!mounted) return;
+
+    if (result == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Request sparepart berhasil dikirim ke admin."),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
@@ -773,7 +1049,11 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
 
     final bookingId = job["id"]?.toString() ?? "-";
     final reportId =
-        job["damage_report_id"]?.toString() ?? _getDamageReport()?["id"]?.toString() ?? "-";
+        job["damage_report_id"]?.toString() ??
+        _getDamageReport()?["id"]?.toString() ??
+        "-";
+
+    final canRequestSparepart = _canRequestSparepart();
 
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
@@ -818,13 +1098,12 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
               ),
             ),
             const SizedBox(height: 12),
-
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: statusColor.withOpacity(0.12),
+                color: statusColor.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: statusColor.withOpacity(0.25)),
+                border: Border.all(color: statusColor.withValues(alpha: 0.25)),
               ),
               child: Text(
                 status,
@@ -845,9 +1124,15 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
               children: [
                 _infoRow("Driver", _getDriverName()),
                 _infoRow("Damage Type", _getDamageType()),
-                _infoRow("Reported At", _formatDate(_getDamageReport()?["created_at"])),
+                _infoRow(
+                  "Reported At",
+                  _formatDate(_getDamageReport()?["created_at"]),
+                ),
                 _infoRow("Scheduled At", _formatDate(job["scheduled_at"])),
-                _infoRow("Est. Finish", _formatDate(job["estimated_finish_at"])),
+                _infoRow(
+                  "Est. Finish",
+                  _formatDate(job["estimated_finish_at"]),
+                ),
                 _infoRow("Started At", _formatDate(job["started_at"])),
                 _infoRow("Completed At", _formatDate(job["completed_at"])),
                 _infoRow("Priority", job["priority"]?.toString() ?? "-"),
@@ -868,6 +1153,8 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
                     height: 1.5,
                   ),
                 ),
+                const SizedBox(height: 14),
+                _buildDamageImageSection(),
               ],
             ),
 
@@ -880,7 +1167,61 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
             const SizedBox(height: 10),
             _noteBox("Admin Note", job["note_admin"]?.toString() ?? "-"),
             const SizedBox(height: 10),
-            _noteBox("Technician Note", job["note_technician"]?.toString() ?? "-"),
+            _noteBox(
+              "Technician Note",
+              job["note_technician"]?.toString() ?? "-",
+            ),
+
+            const SizedBox(height: 24),
+
+            _sectionTitle("Technician Tools"),
+            const SizedBox(height: 10),
+
+            _infoBox(
+              children: [
+                Text(
+                  canRequestSparepart
+                      ? "Cari dan request sparepart yang dibutuhkan selama pekerjaan sedang berlangsung."
+                      : "Request sparepart hanya tersedia setelah job dimulai oleh teknisi.",
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  height: 45,
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        canRequestSparepart ? _openPartRequestModal : null,
+                    icon: const Icon(Icons.inventory_2_outlined, size: 18),
+                    label: const Text("REQUEST SPAREPART"),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFF9A825),
+                      disabledForegroundColor: Colors.white24,
+                      side: BorderSide(
+                        color: canRequestSparepart
+                            ? const Color(0xFFF9A825)
+                            : Colors.white12,
+                      ),
+                    ),
+                  ),
+                ),
+                if (!canRequestSparepart) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    "Klik START JOB terlebih dahulu. Setelah status menjadi In Progress, teknisi baru bisa request sparepart.",
+                    style: TextStyle(
+                      color: Colors.white30,
+                      fontSize: 11,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ],
         ),
       ),
@@ -939,6 +1280,129 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
     );
   }
 
+  Widget _buildDamageImageSection() {
+    final imageUrl = _getDamageImageUrl();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Damage Photo",
+          style: TextStyle(
+            color: Colors.white38,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (imageUrl == null)
+          Container(
+            width: double.infinity,
+            height: 150,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.04),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.08),
+              ),
+            ),
+            child: const Text(
+              "Foto kerusakan belum tersedia.",
+              style: TextStyle(
+                color: Colors.white38,
+                fontSize: 12,
+              ),
+            ),
+          )
+        else
+          GestureDetector(
+            onTap: () => _openDamageImagePreview(imageUrl),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                children: [
+                  Image.network(
+                    imageUrl,
+                    width: double.infinity,
+                    height: 190,
+                    fit: BoxFit.cover,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) {
+                        return child;
+                      }
+
+                      return Container(
+                        width: double.infinity,
+                        height: 190,
+                        alignment: Alignment.center,
+                        color: Colors.white.withValues(alpha: 0.04),
+                        child: const CircularProgressIndicator(
+                          color: Color(0xFFF9A825),
+                        ),
+                      );
+                    },
+                    errorBuilder: (context, error, stackTrace) {
+                      return Container(
+                        width: double.infinity,
+                        height: 150,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.04),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
+                        ),
+                        child: const Text(
+                          "Gambar tidak dapat dimuat.",
+                          style: TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.zoom_in,
+                            color: Colors.white,
+                            size: 14,
+                          ),
+                          SizedBox(width: 4),
+                          Text(
+                            "Tap to view",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _noteBox(String title, String value) {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -946,7 +1410,7 @@ class _TaskDetailsPageState extends State<TaskDetailsPage> {
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.04)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1062,6 +1526,44 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
     super.dispose();
   }
 
+  dynamic _safeJsonDecode(String body) {
+    if (body.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      return jsonDecode(body);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _errorFromResponse(http.Response response, String fallback) {
+    final decoded = _safeJsonDecode(response.body);
+
+    if (decoded is Map<String, dynamic>) {
+      final message = decoded["message"]?.toString();
+
+      if (message != null && message.isNotEmpty) {
+        return message;
+      }
+
+      final errors = decoded["errors"];
+
+      if (errors is Map && errors.isNotEmpty) {
+        final firstValue = errors.values.first;
+
+        if (firstValue is List && firstValue.isNotEmpty) {
+          return firstValue.first.toString();
+        }
+
+        return firstValue.toString();
+      }
+    }
+
+    return "$fallback. Status: ${response.statusCode}";
+  }
+
   Map<String, dynamic>? _asMap(dynamic value) {
     if (value is Map<String, dynamic>) {
       return value;
@@ -1101,6 +1603,8 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
   }
 
   void _calculateKPI() {
+    if (!mounted) return;
+
     setState(() {
       final rt = double.tryParse(_repairTime.text) ?? 0;
       final ot = double.tryParse(_opTime.text) ?? 0;
@@ -1115,6 +1619,10 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
   }
 
   Future<void> _submitJobAction() async {
+    if (_isSubmitting) return;
+
+    if (!mounted) return;
+
     setState(() => _isSubmitting = true);
 
     try {
@@ -1126,8 +1634,20 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
 
       final bookingId = widget.job["id"]?.toString();
 
-      if (bookingId == null || bookingId.isEmpty) {
+      if (bookingId == null || bookingId.isEmpty || bookingId == "null") {
         throw Exception("Booking ID tidak valid.");
+      }
+
+      if (_isCompleteAction) {
+        final rt = double.tryParse(_repairTime.text) ?? 0;
+        final ot = double.tryParse(_opTime.text) ?? 0;
+        final f = double.tryParse(_failures.text) ?? 1;
+        final ao = double.tryParse(_actualOp.text) ?? 0;
+        final bd = double.tryParse(_breakdown.text) ?? 0;
+
+        mttr = f > 0 ? rt / f : 0;
+        mtbf = f > 0 ? ot / f : 0;
+        ma = (ao + bd) > 0 ? (ao / (ao + bd)) * 100 : 0;
       }
 
       final endpoint = _isStartAction
@@ -1141,18 +1661,20 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
       }
 
       if (_isCompleteAction) {
-        _calculateKPI();
-
         body["mttr"] = mttr.toStringAsFixed(2);
         body["mtbf"] = mtbf.toStringAsFixed(2);
         body["ma"] = ma.toStringAsFixed(1);
       }
+
+      debugPrint("JOB ACTION URL: $endpoint");
+      debugPrint("JOB ACTION BODY: $body");
 
       final response = await http.post(
         Uri.parse(endpoint),
         headers: {
           "Accept": "application/json",
           "Authorization": "Bearer $token",
+          "Content-Type": "application/x-www-form-urlencoded",
         },
         body: body,
       );
@@ -1160,7 +1682,7 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
       debugPrint("JOB ACTION STATUS: ${response.statusCode}");
       debugPrint("JOB ACTION BODY: ${response.body}");
 
-      if (response.statusCode == 200 || response.statusCode == 201) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
         if (!mounted) return;
 
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1174,16 +1696,23 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
           ),
         );
 
-        Navigator.of(context).popUntil((route) => route.isFirst);
+        Navigator.pop(context, true);
       } else {
-        throw Exception("Gagal update job: ${response.body}");
+        throw Exception(
+          _errorFromResponse(
+            response,
+            "Gagal update job",
+          ),
+        );
       }
     } catch (e) {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("Error: $e"),
+          content: Text(
+            e.toString().replaceFirst("Exception: ", ""),
+          ),
           backgroundColor: Colors.red,
         ),
       );
@@ -1227,9 +1756,7 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
                 fontWeight: FontWeight.bold,
               ),
             ),
-
             const SizedBox(height: 12),
-
             Text(
               subtitle,
               style: const TextStyle(
@@ -1238,9 +1765,7 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
                 height: 1.4,
               ),
             ),
-
             const SizedBox(height: 24),
-
             TextField(
               controller: _noteController,
               maxLines: 3,
@@ -1259,12 +1784,9 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
                 border: const OutlineInputBorder(),
               ),
             ),
-
             if (_isCompleteAction) ...[
               const SizedBox(height: 30),
-
               const Divider(color: Colors.white10),
-
               const Text(
                 "KPI Analytics",
                 style: TextStyle(
@@ -1272,9 +1794,7 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 6),
-
               const Text(
                 "Opsional. Isi data KPI jika pekerjaan sudah selesai.",
                 style: TextStyle(
@@ -1282,17 +1802,13 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
                   fontSize: 11,
                 ),
               ),
-
               const SizedBox(height: 15),
-
               _input("Total Repair Time", _repairTime),
               _input("Total Operational Time", _opTime),
               _input("Number of Failures", _failures),
               _input("Actual Operating Hours", _actualOp),
               _input("Breakdown Hours", _breakdown),
-
               const SizedBox(height: 10),
-
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -1300,17 +1816,13 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
                   child: const Text("PREVIEW RESULTS"),
                 ),
               ),
-
               const SizedBox(height: 20),
-
               _resRow("MTTR:", "${mttr.toStringAsFixed(2)} hrs"),
               const SizedBox(height: 8),
               _resRow("MTBF:", "${mtbf.toStringAsFixed(2)} hrs"),
               const SizedBox(height: 8),
               _resRow("MA:", "${ma.toStringAsFixed(1)} %"),
-
               const SizedBox(height: 20),
-
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
@@ -1407,6 +1919,565 @@ class _TaskUpdatePageState extends State<TaskUpdatePage> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// -------------------------------------------------------------------
+// MODAL: REQUEST SPAREPART TEKNISI
+// -------------------------------------------------------------------
+class RequestPartUsageModal extends StatefulWidget {
+  final int damageReportId;
+  final String unitName;
+
+  const RequestPartUsageModal({
+    super.key,
+    required this.damageReportId,
+    required this.unitName,
+  });
+
+  @override
+  State<RequestPartUsageModal> createState() => _RequestPartUsageModalState();
+}
+
+class _RequestPartUsageModalState extends State<RequestPartUsageModal> {
+  final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _qtyController = TextEditingController(text: "1");
+  final TextEditingController _noteController = TextEditingController();
+
+  Timer? _searchDebounce;
+
+  bool _isLoading = true;
+  bool _isSubmitting = false;
+  String? _errorMessage;
+
+  List<dynamic> _parts = [];
+  int? _selectedPartId;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadParts();
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    _qtyController.dispose();
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  Map<String, dynamic>? _asMap(dynamic value) {
+    if (value is Map<String, dynamic>) {
+      return value;
+    }
+
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+
+    return null;
+  }
+
+  Map<String, dynamic>? _selectedPart() {
+    if (_selectedPartId == null) {
+      return null;
+    }
+
+    for (final item in _parts) {
+      final part = _asMap(item);
+      if (part == null) continue;
+
+      final id = int.tryParse(part["id"]?.toString() ?? "") ?? 0;
+
+      if (id == _selectedPartId) {
+        return part;
+      }
+    }
+
+    return null;
+  }
+
+  Future<void> _loadParts() async {
+    if (!mounted) return;
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final parts = await TechnicianPartUsageService.getParts(
+        search: _searchController.text.trim(),
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _parts = parts;
+
+        final selectedStillExists = _selectedPartId != null &&
+            _parts
+                .map((item) => _asMap(item))
+                .whereType<Map<String, dynamic>>()
+                .any((part) {
+              final id =
+                  int.tryParse(part["id"]?.toString() ?? "") ?? 0;
+              return id == _selectedPartId;
+            });
+
+        if (!selectedStillExists) {
+          _selectedPartId = null;
+        }
+
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _errorMessage = e.toString().replaceFirst("Exception: ", "");
+        _parts = [];
+        _selectedPartId = null;
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+
+    _searchDebounce = Timer(
+      const Duration(milliseconds: 450),
+      () {
+        _loadParts();
+      },
+    );
+  }
+
+  int _getStock(Map<String, dynamic>? part) {
+    if (part == null) return 0;
+
+    return int.tryParse(part["stock"]?.toString() ?? "0") ?? 0;
+  }
+
+  String _getPartName(Map<String, dynamic>? part) {
+    if (part == null) return "-";
+
+    return part["name"]?.toString() ?? "-";
+  }
+
+  String _getPartSku(Map<String, dynamic>? part) {
+    if (part == null) return "-";
+
+    return part["sku"]?.toString() ?? "-";
+  }
+
+  Future<void> _submitRequest() async {
+    if (_isSubmitting) return;
+
+    final partId = _selectedPartId;
+    final selectedPart = _selectedPart();
+    final stock = _getStock(selectedPart);
+    final qty = int.tryParse(_qtyController.text.trim()) ?? 0;
+
+    if (partId == null || partId <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Pilih sparepart terlebih dahulu."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    if (qty < 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Qty minimal 1."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    if (stock <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Stok sparepart ini sedang kosong."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    if (qty > stock) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Qty melebihi stok tersedia. Stok saat ini: $stock."),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      await TechnicianPartUsageService.requestPartUsage(
+        partId: partId,
+        damageReportId: widget.damageReportId,
+        qty: qty,
+        note: _noteController.text.trim(),
+      );
+
+      if (!mounted) return;
+
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst("Exception: ", "")),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  Widget _buildSearchField() {
+    return TextField(
+      controller: _searchController,
+      style: const TextStyle(color: Colors.white),
+      onChanged: _onSearchChanged,
+      decoration: InputDecoration(
+        labelText: "Search sparepart",
+        hintText: "Cari nama part atau SKU...",
+        labelStyle: const TextStyle(color: Colors.white38),
+        hintStyle: const TextStyle(color: Colors.white24),
+        prefixIcon: const Icon(
+          Icons.search,
+          color: Colors.white38,
+        ),
+        suffixIcon: _searchController.text.trim().isEmpty
+            ? null
+            : IconButton(
+                onPressed: () {
+                  _searchController.clear();
+                  _loadParts();
+                },
+                icon: const Icon(
+                  Icons.close,
+                  color: Colors.white38,
+                ),
+              ),
+        filled: true,
+        fillColor: Colors.white10,
+        border: const OutlineInputBorder(),
+      ),
+    );
+  }
+
+  Widget _buildPartPicker() {
+    if (_isLoading) {
+      return const SizedBox(
+        height: 170,
+        child: Center(
+          child: CircularProgressIndicator(
+            color: Color(0xFFF9A825),
+          ),
+        ),
+      );
+    }
+
+    if (_errorMessage != null) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(13),
+        decoration: BoxDecoration(
+          color: Colors.redAccent.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: Colors.redAccent.withValues(alpha: 0.25),
+          ),
+        ),
+        child: Text(
+          _errorMessage!,
+          style: const TextStyle(
+            color: Colors.redAccent,
+            fontSize: 12,
+            height: 1.4,
+          ),
+        ),
+      );
+    }
+
+    final mappedParts = _parts
+        .map((item) => _asMap(item))
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
+    if (mappedParts.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(13),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.035),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.05),
+          ),
+        ),
+        child: const Text(
+          "Sparepart tidak ditemukan. Coba kata kunci lain.",
+          style: TextStyle(
+            color: Colors.white54,
+            fontSize: 12,
+            height: 1.4,
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      constraints: const BoxConstraints(
+        maxHeight: 260,
+      ),
+      child: ListView.builder(
+        shrinkWrap: true,
+        itemCount: mappedParts.length,
+        itemBuilder: (context, index) {
+          final part = mappedParts[index];
+
+          final id = int.tryParse(part["id"]?.toString() ?? "") ?? 0;
+          final sku = _getPartSku(part);
+          final name = _getPartName(part);
+          final stock = _getStock(part);
+          final isSelected = _selectedPartId == id;
+          final isEmptyStock = stock <= 0;
+
+          return Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? const Color(0xFFF9A825).withValues(alpha: 0.12)
+                  : Colors.white.withValues(alpha: 0.04),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isSelected
+                    ? const Color(0xFFF9A825)
+                    : Colors.white12,
+              ),
+            ),
+            child: ListTile(
+              enabled: !isEmptyStock,
+              onTap: isEmptyStock
+                  ? null
+                  : () {
+                      setState(() {
+                        _selectedPartId = id;
+                      });
+                    },
+              title: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: isEmptyStock ? Colors.white30 : Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  "SKU: $sku • Stok: $stock",
+                  style: TextStyle(
+                    color: isEmptyStock ? Colors.redAccent : Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+              trailing: isEmptyStock
+                  ? const Text(
+                      "Kosong",
+                      style: TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    )
+                  : isSelected
+                      ? const Icon(
+                          Icons.check_circle,
+                          color: Color(0xFFF9A825),
+                        )
+                      : const Icon(
+                          Icons.radio_button_unchecked,
+                          color: Colors.white24,
+                        ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSelectedPartInfo() {
+    final selectedPart = _selectedPart();
+
+    if (selectedPart == null) {
+      return const SizedBox.shrink();
+    }
+
+    final name = _getPartName(selectedPart);
+    final sku = _getPartSku(selectedPart);
+    final stock = _getStock(selectedPart);
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9A825).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: const Color(0xFFF9A825).withValues(alpha: 0.18),
+        ),
+      ),
+      child: Text(
+        "Dipilih: $sku — $name • Stok tersedia: $stock",
+        style: const TextStyle(
+          color: Color(0xFFF9A825),
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          height: 1.4,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+
+    return Container(
+      padding: EdgeInsets.fromLTRB(20, 18, 20, bottomInset + 20),
+      decoration: const BoxDecoration(
+        color: Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(20),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                "Request Sparepart",
+                style: TextStyle(
+                  color: Color(0xFFF9A825),
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                widget.unitName,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                "Search aktif otomatis saat diketik. Pilih part dari list, lalu masukkan qty yang dibutuhkan.",
+                style: TextStyle(
+                  color: Colors.white30,
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 18),
+              _buildSearchField(),
+              const SizedBox(height: 12),
+              _buildPartPicker(),
+              _buildSelectedPartInfo(),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _qtyController,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: "Qty",
+                  labelStyle: TextStyle(color: Colors.white38),
+                  filled: true,
+                  fillColor: Colors.white10,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _noteController,
+                maxLines: 3,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: "Catatan",
+                  hintText: "Contoh: Butuh untuk penggantian filter...",
+                  labelStyle: TextStyle(color: Colors.white38),
+                  hintStyle: TextStyle(color: Colors.white24),
+                  filled: true,
+                  fillColor: Colors.white10,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  onPressed: _isSubmitting ? null : _submitRequest,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFF9A825),
+                  ),
+                  child: _isSubmitting
+                      ? const CircularProgressIndicator(
+                          color: Colors.black,
+                        )
+                      : const Text(
+                          "KIRIM REQUEST",
+                          style: TextStyle(
+                            color: Colors.black,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

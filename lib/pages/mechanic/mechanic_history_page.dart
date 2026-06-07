@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:djatimobile_project/core/services/auth_service.dart';
+import 'package:djatimobile_project/core/services/technician_part_usage_service.dart';
 
 // -------------------------------------------------------------------
 // 1. HALAMAN UTAMA: REPAIR / MAINTENANCE HISTORY TEKNISI
@@ -20,7 +21,10 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
 
   bool _isLoading = true;
   String? _errorMessage;
+  String? _partUsageError;
+
   List<dynamic> _jobs = [];
+  List<dynamic> _partUsages = [];
 
   @override
   void initState() {
@@ -32,6 +36,7 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _partUsageError = null;
     });
 
     try {
@@ -53,32 +58,65 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
       debugPrint("MECHANIC HISTORY BODY: ${response.body}");
 
       if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
+        final decoded = _safeJsonDecode(response.body);
 
         List<dynamic> jobs = [];
 
         if (decoded is List) {
           jobs = decoded;
-        } else if (decoded is Map<String, dynamic> && decoded["data"] is List) {
-          jobs = decoded["data"];
+        } else if (decoded is Map<String, dynamic>) {
+          final data = decoded["data"];
+
+          if (data is List) {
+            jobs = data;
+          } else if (data is Map<String, dynamic> &&
+              data["data"] is List) {
+            jobs = data["data"];
+          }
+        }
+
+        List<dynamic> partUsages = [];
+
+        try {
+          partUsages =
+              await TechnicianPartUsageService.getMyPartUsages();
+        } catch (partError) {
+          _partUsageError = partError
+              .toString()
+              .replaceFirst("Exception: ", "");
         }
 
         if (!mounted) return;
 
         setState(() {
           _jobs = jobs;
+          _partUsages = partUsages;
           _isLoading = false;
         });
       } else {
-        throw Exception("Gagal mengambil history job teknisi: ${response.body}");
+        throw Exception(
+          "Gagal mengambil history job teknisi: ${response.body}",
+        );
       }
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
-        _errorMessage = e.toString();
+        _errorMessage = e.toString().replaceFirst("Exception: ", "");
         _isLoading = false;
       });
+    }
+  }
+
+  dynamic _safeJsonDecode(String body) {
+    if (body.trim().isEmpty) {
+      return null;
+    }
+
+    try {
+      return jsonDecode(body);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -95,7 +133,9 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
   }
 
   Map<String, dynamic>? _getDamageReport(Map<String, dynamic> job) {
-    return _asMap(job["damage_report"]);
+    return _asMap(job["damage_report"]) ??
+        _asMap(job["damageReport"]) ??
+        _asMap(job["report"]);
   }
 
   Map<String, dynamic>? _getVehicle(Map<String, dynamic> job) {
@@ -112,6 +152,42 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
 
     final report = _getDamageReport(job);
     return _asMap(report?["driver"]);
+  }
+
+  int? _getDamageReportId(Map<String, dynamic> job) {
+    final report = _getDamageReport(job);
+
+    final rawId =
+        job["damage_report_id"] ??
+        job["damageReportId"] ??
+        report?["id"];
+
+    return int.tryParse(rawId?.toString() ?? "");
+  }
+
+  List<Map<String, dynamic>> _getPartUsagesForJob(
+    Map<String, dynamic> job,
+  ) {
+    final damageReportId = _getDamageReportId(job);
+
+    if (damageReportId == null || damageReportId <= 0) {
+      return [];
+    }
+
+    return _partUsages
+        .map((item) => _asMap(item))
+        .whereType<Map<String, dynamic>>()
+        .where((usage) {
+      final rawId = usage["damage_report_id"] ??
+          usage["damageReportId"] ??
+          usage["damage_report"]?["id"] ??
+          usage["damageReport"]?["id"];
+
+      final usageDamageReportId =
+          int.tryParse(rawId?.toString() ?? "");
+
+      return usageDamageReportId == damageReportId;
+    }).toList();
   }
 
   String _getUnitName(Map<String, dynamic> job) {
@@ -152,6 +228,107 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
         "-";
   }
 
+  String? _normalizeDamageImageUrl(dynamic value) {
+    final raw = value?.toString().trim();
+
+    if (raw == null || raw.isEmpty || raw == "null") {
+      return null;
+    }
+
+    if (raw.startsWith("http://") || raw.startsWith("https://")) {
+      return raw;
+    }
+
+    var path = raw.replaceAll("\\", "/");
+
+    if (path.startsWith("/storage/")) {
+      return "http://10.0.2.2:8000$path";
+    }
+
+    if (path.startsWith("storage/")) {
+      return "http://10.0.2.2:8000/$path";
+    }
+
+    if (path.startsWith("public/")) {
+      path = path.replaceFirst("public/", "");
+    }
+
+    if (path.startsWith("/")) {
+      path = path.substring(1);
+    }
+
+    return "http://10.0.2.2:8000/storage/$path";
+  }
+
+  String? _getDamageImageUrl(Map<String, dynamic> job) {
+    final report = _getDamageReport(job);
+
+    final rawImage = report?["image_url"] ??
+        report?["photo_url"] ??
+        report?["damage_image_url"] ??
+        report?["image"] ??
+        report?["image_path"] ??
+        report?["photo"] ??
+        report?["damage_photo"] ??
+        report?["picture"] ??
+        report?["file_path"] ??
+        job["image_url"] ??
+        job["photo_url"] ??
+        job["damage_image_url"] ??
+        job["image"] ??
+        job["image_path"] ??
+        job["photo"] ??
+        job["damage_photo"] ??
+        job["picture"] ??
+        job["file_path"];
+
+    return _normalizeDamageImageUrl(rawImage);
+  }
+
+  void _openDamageImagePreview(String imageUrl) {
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.black,
+          insetPadding: const EdgeInsets.all(12),
+          child: Stack(
+            children: [
+              InteractiveViewer(
+                child: Center(
+                  child: Image.network(
+                    imageUrl,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) {
+                      return const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          "Gambar tidak dapat dimuat.",
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(
+                    Icons.close,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   String _getDriverName(Map<String, dynamic> job) {
     final driver = _getDriver(job);
 
@@ -172,7 +349,11 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
     }
 
     try {
-      final date = DateTime.parse(raw).toLocal();
+      final normalized = raw.contains(" ") && !raw.contains("T")
+          ? raw.replaceFirst(" ", "T")
+          : raw;
+
+      final date = DateTime.parse(normalized).toLocal();
 
       final day = date.day.toString().padLeft(2, '0');
       final month = date.month.toString().padLeft(2, '0');
@@ -244,6 +425,40 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
 
       default:
         return Colors.white54;
+    }
+  }
+
+  Color _getPartUsageColor(String status) {
+    switch (status.toLowerCase()) {
+      case "approved":
+        return Colors.green;
+
+      case "rejected":
+        return Colors.redAccent;
+
+      case "requested":
+      case "pending":
+        return Colors.orange;
+
+      default:
+        return Colors.white54;
+    }
+  }
+
+  String _getPartUsageStatusLabel(String status) {
+    switch (status.toLowerCase()) {
+      case "approved":
+        return "Approved";
+
+      case "rejected":
+        return "Rejected";
+
+      case "requested":
+      case "pending":
+        return "Pending";
+
+      default:
+        return status;
     }
   }
 
@@ -463,9 +678,32 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
       backgroundColor: const Color(0xFF1E1E1E),
       child: ListView.builder(
         padding: const EdgeInsets.all(16),
-        itemCount: _jobs.length,
+        itemCount: _jobs.length + (_partUsageError != null ? 1 : 0),
         itemBuilder: (context, index) {
-          final item = _jobs[index];
+          if (_partUsageError != null && index == 0) {
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.redAccent.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: Colors.redAccent.withValues(alpha: 0.25),
+                ),
+              ),
+              child: Text(
+                "Riwayat sparepart belum bisa dimuat: $_partUsageError",
+                style: const TextStyle(
+                  color: Colors.redAccent,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+            );
+          }
+
+          final jobIndex = _partUsageError != null ? index - 1 : index;
+          final item = _jobs[jobIndex];
 
           if (item is! Map) return const SizedBox.shrink();
 
@@ -493,12 +731,14 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
           final isCompleted = _isCompleted(job);
           final isClosed = _isClosed(job);
 
+          final partUsages = _getPartUsagesForJob(job);
+
           return Card(
             color: const Color(0xFF1E1E1E),
             margin: const EdgeInsets.only(bottom: 16),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
-              side: BorderSide(color: statusColor.withOpacity(0.3)),
+              side: BorderSide(color: statusColor.withValues(alpha: 0.3)),
             ),
             child: Column(
               children: [
@@ -602,6 +842,8 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
                         icon: Icons.report_problem_outlined,
                         text: "Jenis: $damageType",
                       ),
+                      const SizedBox(height: 12),
+                      _buildDamageImageSection(job),
                       const SizedBox(height: 16),
                       const Text(
                         "Maintenance Details:",
@@ -620,7 +862,9 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
                             text: detail,
                           ),
                         );
-                      }).toList(),
+                      }),
+                      const SizedBox(height: 16),
+                      _buildPartUsageSection(partUsages),
                       if (isCompleted && !hasKpi) ...[
                         const SizedBox(height: 16),
                         SizedBox(
@@ -647,6 +891,214 @@ class _MechanicHistoryPageState extends State<MechanicHistoryPage> {
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildDamageImageSection(Map<String, dynamic> job) {
+    final imageUrl = _getDamageImageUrl(job);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Foto Kerusakan:",
+          style: TextStyle(
+            color: Colors.white70,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (imageUrl == null)
+          Container(
+            width: double.infinity,
+            height: 130,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.035),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.06),
+              ),
+            ),
+            child: const Text(
+              "Foto kerusakan belum tersedia.",
+              style: TextStyle(
+                color: Colors.white38,
+                fontSize: 12,
+              ),
+            ),
+          )
+        else
+          GestureDetector(
+            onTap: () => _openDamageImagePreview(imageUrl),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                children: [
+                  Image.network(
+                    imageUrl,
+                    width: double.infinity,
+                    height: 170,
+                    fit: BoxFit.cover,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) {
+                        return child;
+                      }
+
+                      return Container(
+                        width: double.infinity,
+                        height: 170,
+                        alignment: Alignment.center,
+                        color: Colors.white.withValues(alpha: 0.04),
+                        child: const CircularProgressIndicator(
+                          color: Color(0xFFF9A825),
+                        ),
+                      );
+                    },
+                    errorBuilder: (context, error, stackTrace) {
+                      return Container(
+                        width: double.infinity,
+                        height: 130,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.035),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.06),
+                          ),
+                        ),
+                        child: const Text(
+                          "Gambar tidak dapat dimuat.",
+                          style: TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.zoom_in,
+                            color: Colors.white,
+                            size: 14,
+                          ),
+                          SizedBox(width: 4),
+                          Text(
+                            "Tap to view",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildPartUsageSection(
+    List<Map<String, dynamic>> partUsages,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Sparepart Requests:",
+          style: TextStyle(
+            color: Colors.white70,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (partUsages.isEmpty)
+          _buildInfoRow(
+            icon: Icons.inventory_2_outlined,
+            text: "Belum ada request sparepart untuk job ini.",
+          )
+        else
+          ...partUsages.map((usage) {
+            final part = _asMap(usage["part"]);
+            final partName = part?["name"]?.toString() ?? "-";
+            final partSku = part?["sku"]?.toString() ?? "-";
+            final qty = usage["qty"]?.toString() ?? "0";
+            final statusRaw = usage["status"]?.toString() ?? "requested";
+            final status = _getPartUsageStatusLabel(statusRaw);
+            final color = _getPartUsageColor(statusRaw);
+            final createdAt = _formatDateTime(usage["created_at"]);
+            final note = usage["note"]?.toString() ?? "-";
+
+            return Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.035),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: color.withValues(alpha: 0.25),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "$partSku — $partName",
+                    style: const TextStyle(
+                      color: Color(0xFFF9A825),
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  _smallText("Qty: $qty"),
+                  _smallText("Status: $status", color: color),
+                  if (createdAt != "-") _smallText("Requested: $createdAt"),
+                  if (note != "-") _smallText("Note: $note"),
+                ],
+              ),
+            );
+          }),
+      ],
+    );
+  }
+
+  Widget _smallText(
+    String text, {
+    Color color = Colors.white54,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          height: 1.4,
+        ),
       ),
     );
   }
@@ -946,9 +1398,7 @@ class _UpdateKpiModalState extends State<UpdateKpiModal> {
                 ),
               ],
             ),
-
             const SizedBox(height: 22),
-
             TextField(
               controller: _noteController,
               maxLines: 3,
@@ -970,11 +1420,9 @@ class _UpdateKpiModalState extends State<UpdateKpiModal> {
                 ),
               ),
             ),
-
             const SizedBox(height: 25),
             const Divider(color: Colors.white10),
             const SizedBox(height: 10),
-
             const Text(
               "KPI Analytics Calculation",
               style: TextStyle(
@@ -982,17 +1430,13 @@ class _UpdateKpiModalState extends State<UpdateKpiModal> {
                 fontWeight: FontWeight.bold,
               ),
             ),
-
             const SizedBox(height: 15),
-
             _input("Total Repair Time (Hours)", _repairTime),
             _input("Total Operational Time (Hours)", _opTime),
             _input("Number of Failures", _failures),
             _input("Actual Operating Hours", _actualOp),
             _input("Breakdown Hours", _breakdown),
-
             const SizedBox(height: 10),
-
             SizedBox(
               width: double.infinity,
               height: 45,
@@ -1013,17 +1457,13 @@ class _UpdateKpiModalState extends State<UpdateKpiModal> {
                 ),
               ),
             ),
-
             const SizedBox(height: 26),
-
             _resRow("MTTR:", "${mttr.toStringAsFixed(2)} hrs"),
             const SizedBox(height: 8),
             _resRow("MTBF:", "${mtbf.toStringAsFixed(2)} hrs"),
             const SizedBox(height: 8),
             _resRow("MA:", "${ma.toStringAsFixed(1)} %"),
-
             const SizedBox(height: 30),
-
             SizedBox(
               width: double.infinity,
               height: 50,
@@ -1054,7 +1494,6 @@ class _UpdateKpiModalState extends State<UpdateKpiModal> {
                       ),
               ),
             ),
-
             const SizedBox(height: 25),
           ],
         ),

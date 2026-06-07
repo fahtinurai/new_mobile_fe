@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'repair_status_page.dart';
 import 'package:djatimobile_project/core/services/service_booking_service.dart';
 
 class DriverServiceBookingPage extends StatefulWidget {
@@ -9,7 +10,8 @@ class DriverServiceBookingPage extends StatefulWidget {
       _DriverServiceBookingPageState();
 }
 
-class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
+class _DriverServiceBookingPageState extends State<DriverServiceBookingPage>
+    with WidgetsBindingObserver {
   bool _isLoading = true;
   String? _errorMessage;
   List<dynamic> _bookings = [];
@@ -17,29 +19,64 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
   @override
   void initState() {
     super.initState();
-    _loadBookings();
+
+    WidgetsBinding.instance.addObserver(this);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _loadBookings();
+      }
+    });
   }
 
-  Future<void> _loadBookings() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      _loadBookings(showLoading: false);
+    }
+  }
+
+  Future<void> _loadBookings({
+    bool showLoading = true,
+  }) async {
+    if (!mounted) return;
+
+    if (showLoading) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    } else {
+      setState(() {
+        _errorMessage = null;
+      });
+    }
 
     try {
       final bookings = await ServiceBookingService.getMyBookings();
 
       if (!mounted) return;
 
+      final safeBookings = bookings
+          .map((item) => _asMap(item))
+          .whereType<Map<String, dynamic>>()
+          .toList();
+
       setState(() {
-        _bookings = bookings;
+        _bookings = safeBookings;
         _isLoading = false;
       });
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
-        _errorMessage = e.toString();
+        _errorMessage = e.toString().replaceFirst("Exception: ", "");
         _isLoading = false;
       });
     }
@@ -62,6 +99,18 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
 
     if (report != null) {
       return report;
+    }
+
+    final camelReport = _asMap(booking["damageReport"]);
+
+    if (camelReport != null) {
+      return camelReport;
+    }
+
+    final directReport = _asMap(booking["report"]);
+
+    if (directReport != null) {
+      return directReport;
     }
 
     return null;
@@ -115,6 +164,11 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
       return assignedTechnician;
     }
 
+    final assignedTechnicianCamel = _asMap(booking["assignedTechnician"]);
+    if (assignedTechnicianCamel != null) {
+      return assignedTechnicianCamel;
+    }
+
     return null;
   }
 
@@ -126,7 +180,11 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
     }
 
     try {
-      final date = DateTime.parse(raw).toLocal();
+      final normalized = raw.contains(" ") && !raw.contains("T")
+          ? raw.replaceFirst(" ", "T")
+          : raw;
+
+      final date = DateTime.parse(normalized).toLocal();
 
       final day = date.day.toString().padLeft(2, '0');
       final month = date.month.toString().padLeft(2, '0');
@@ -152,7 +210,9 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
 
     final report = _getDamageReport(booking);
 
-    return report?["equipment_name"]?.toString() ?? "Unknown Unit";
+    return report?["equipment_name"]?.toString() ??
+        booking["equipment_name"]?.toString() ??
+        "Unknown Unit";
   }
 
   String _getPlateNumber(Map<String, dynamic> booking) {
@@ -162,7 +222,7 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
       return vehicle["plate_number"]?.toString() ?? "-";
     }
 
-    return "-";
+    return booking["plate_number"]?.toString() ?? "-";
   }
 
   String _getDamageType(Map<String, dynamic> booking) {
@@ -197,6 +257,14 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
     final technician = _getTechnician(booking);
 
     if (technician == null) {
+      final technicianName =
+          booking["technician_name"]?.toString() ??
+          booking["mechanic_name"]?.toString();
+
+      if (technicianName != null && technicianName.isNotEmpty) {
+        return technicianName;
+      }
+
       return "Belum ditugaskan";
     }
 
@@ -431,13 +499,13 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
         ),
       );
 
-      _loadBookings();
+      await _loadBookings(showLoading: false);
     } catch (e) {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("Error: $e"),
+          content: Text(e.toString().replaceFirst("Exception: ", "")),
           backgroundColor: Colors.red,
         ),
       );
@@ -624,10 +692,12 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
             ),
           ),
           const SizedBox(height: 20),
-          ..._bookings.map<Widget>((item) {
-            final booking = Map<String, dynamic>.from(item as Map);
-            return _buildBookingCard(booking);
-          }).toList(),
+          ..._bookings
+              .map((item) => _asMap(item))
+              .whereType<Map<String, dynamic>>()
+              .map<Widget>((booking) {
+                return _buildBookingCard(booking);
+              }),
         ],
       ),
     );
@@ -665,7 +735,7 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: color.withOpacity(0.35),
+          color: color.withValues(alpha: 0.35),
         ),
       ),
       child: ExpansionTile(
@@ -797,9 +867,9 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
         vertical: 5,
       ),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withOpacity(0.25)),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
       ),
       child: Text(
         label,
@@ -819,9 +889,9 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
         vertical: 5,
       ),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
+        color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
       child: Text(
         label,
@@ -839,9 +909,9 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
       width: double.infinity,
       padding: const EdgeInsets.all(13),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.035),
+        color: Colors.white.withValues(alpha: 0.035),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.18)),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -888,7 +958,7 @@ class _DriverServiceBookingPageState extends State<DriverServiceBookingPage> {
           Icon(
             Icons.check_circle_outline,
             size: 18,
-            color: color.withOpacity(0.85),
+            color: color.withValues(alpha: 0.85),
           ),
           const SizedBox(width: 10),
           Expanded(

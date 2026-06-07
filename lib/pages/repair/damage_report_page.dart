@@ -8,7 +8,6 @@ import 'package:image_picker/image_picker.dart';
 import 'package:djatimobile_project/core/services/auth_service.dart';
 import 'package:djatimobile_project/core/services/damage_report_service.dart';
 import 'package:djatimobile_project/core/services/service_booking_service.dart';
-import 'package:djatimobile_project/pages/dashboard/driver_service_booking_page.dart';
 
 class DamageReportPage extends StatefulWidget {
   const DamageReportPage({super.key});
@@ -65,6 +64,17 @@ class _DamageReportPageState extends State<DamageReportPage> {
     _descriptionController.addListener(_refreshSubmitState);
 
     _loadMyVehicle();
+  }
+
+  @override
+  void dispose() {
+    _damageTypeController.removeListener(_refreshSubmitState);
+    _descriptionController.removeListener(_refreshSubmitState);
+
+    _damageTypeController.dispose();
+    _descriptionController.dispose();
+
+    super.dispose();
   }
 
   void _refreshSubmitState() {
@@ -235,8 +245,7 @@ class _DamageReportPageState extends State<DamageReportPage> {
   }
 
   int? _extractDamageReportId(Map<String, dynamic> reportData) {
-    final possibleId =
-        reportData["id"] ??
+    final possibleId = reportData["id"] ??
         reportData["damage_report_id"] ??
         reportData["damageReportId"] ??
         reportData["data"]?["id"] ??
@@ -255,7 +264,9 @@ class _DamageReportPageState extends State<DamageReportPage> {
     if (_vehicle == null || vehicleId == null || equipmentName.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Kendaraan belum valid atau belum di-assign ke akun driver ini."),
+          content: Text(
+            "Kendaraan belum valid atau belum di-assign ke akun driver ini.",
+          ),
           backgroundColor: Colors.red,
         ),
       );
@@ -304,6 +315,13 @@ class _DamageReportPageState extends State<DamageReportPage> {
 
       if (!mounted) return;
 
+      setState(() {
+        _damageTypeController.clear();
+        _descriptionController.clear();
+        _image = null;
+        _preferredAt = null;
+      });
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -313,19 +331,9 @@ class _DamageReportPageState extends State<DamageReportPage> {
         ),
       );
 
-      setState(() {
-        _damageTypeController.clear();
-        _descriptionController.clear();
-        _image = null;
-        _preferredAt = null;
-      });
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => const DriverServiceBookingPage(),
-        ),
-      );
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(true);
+      }
     } catch (e) {
       if (!mounted) return;
 
@@ -342,16 +350,6 @@ class _DamageReportPageState extends State<DamageReportPage> {
     }
   }
 
-  @override
-  void dispose() {
-    _damageTypeController.removeListener(_refreshSubmitState);
-    _descriptionController.removeListener(_refreshSubmitState);
-
-    _damageTypeController.dispose();
-    _descriptionController.dispose();
-    super.dispose();
-  }
-
   Widget _buildInput(
     TextEditingController controller,
     String hint, {
@@ -363,7 +361,10 @@ class _DamageReportPageState extends State<DamageReportPage> {
       style: const TextStyle(color: Colors.white),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: const TextStyle(color: Colors.white24, fontSize: 14),
+        hintStyle: const TextStyle(
+          color: Colors.white24,
+          fontSize: 14,
+        ),
         filled: true,
         fillColor: const Color(0xFF1E1E1E),
         border: OutlineInputBorder(
@@ -425,7 +426,7 @@ class _DamageReportPageState extends State<DamageReportPage> {
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFF9A825)),
+        border: Border.all(color: Color(0xFFF9A825)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -439,7 +440,9 @@ class _DamageReportPageState extends State<DamageReportPage> {
           ),
           const SizedBox(height: 8),
           Text(
-            _equipmentName.isEmpty ? "Nama unit tidak tersedia" : _equipmentName,
+            _equipmentName.isEmpty
+                ? "Nama unit tidak tersedia"
+                : _equipmentName,
             style: const TextStyle(
               color: Colors.white,
               fontSize: 16,
@@ -455,7 +458,10 @@ class _DamageReportPageState extends State<DamageReportPage> {
             const SizedBox(height: 4),
             Text(
               "Vehicle ID: $_vehicleId",
-              style: const TextStyle(color: Colors.white38, fontSize: 12),
+              style: const TextStyle(
+                color: Colors.white38,
+                fontSize: 12,
+              ),
             ),
           ],
         ],
@@ -531,7 +537,8 @@ class _DamageReportPageState extends State<DamageReportPage> {
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: _preferredAt == null ? Colors.white10 : const Color(0xFFF9A825),
+          color:
+              _preferredAt == null ? Colors.white10 : const Color(0xFFF9A825),
         ),
       ),
       child: InkWell(
